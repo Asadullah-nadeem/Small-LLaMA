@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 
 from .config import SETTINGS
 from .ingest import ingest_books
-from .llm import LlmConfig, chat, load_llm
+from .llm import LlamaCppBackend, LlamaCppConfig, OllamaBackend, OllamaConfig
 from .pdf_reader import read_pdf_pages
 from .rag import format_context, load_embeddings_and_chunks, retrieve
 
@@ -18,13 +18,24 @@ app = typer.Typer(add_completion=False, help="BOOK LLM novv1 - local book Q&A an
 console = Console()
 
 
-def _model_path_or_fail(model_path: str | None) -> str:
-    model_path = model_path or SETTINGS.model_path
-    if not model_path:
-        raise typer.BadParameter(
-            "Missing model path. Set BOOK_LLM_MODEL_PATH to your .gguf file."
+def _load_backend(model_path: str | None) -> OllamaBackend | LlamaCppBackend:
+    backend = (os.getenv("BOOK_LLM_BACKEND") or SETTINGS.backend).strip().lower()
+    if backend == "ollama":
+        return OllamaBackend(OllamaConfig(url=SETTINGS.ollama_url, model=SETTINGS.ollama_model))
+    if backend == "llama_cpp":
+        model_path = model_path or SETTINGS.model_path
+        if not model_path:
+            raise typer.BadParameter("Missing model path. Set BOOK_LLM_MODEL_PATH to your .gguf file.")
+        return LlamaCppBackend(
+            LlamaCppConfig(
+                model_path=model_path,
+                n_ctx=SETTINGS.n_ctx,
+                n_threads=SETTINGS.n_threads,
+                n_gpu_layers=SETTINGS.n_gpu_layers,
+                chat_format=os.getenv("BOOK_LLM_CHAT_FORMAT"),
+            )
         )
-    return model_path
+    raise typer.BadParameter("BOOK_LLM_BACKEND must be 'ollama' or 'llama_cpp'")
 
 
 def _parse_page_range(s: str) -> tuple[int, int]:
@@ -50,6 +61,60 @@ def list(books_dir: Path = typer.Option(SETTINGS.books_dir, "--books-dir")) -> N
     for p in pdfs:
         t.add_row(p.name, f"{p.stat().st_size / (1024 * 1024):.1f}")
     console.print(t)
+
+
+@app.command("init")
+def init_env(
+    backend: str = typer.Option(
+        "ollama", "--backend", help="ollama (recommended on Windows) or llama_cpp"
+    ),
+    model_path: Path | None = typer.Option(
+        None, "--model-path", help="Full path to your .gguf (only for llama_cpp backend)"
+    ),
+    chat_format: str | None = typer.Option("llama-3", "--chat-format"),
+    ollama_model: str = typer.Option("llama3", "--ollama-model"),
+    ollama_url: str = typer.Option("http://127.0.0.1:11434", "--ollama-url"),
+    n_ctx: int = typer.Option(4096, "--n-ctx"),
+    n_threads: int = typer.Option(0, "--n-threads"),
+    n_gpu_layers: int = typer.Option(0, "--n-gpu-layers"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing .env"),
+) -> None:
+    """
+    Create a local `.env` so you don't have to set env vars every time.
+    """
+    env_path = Path(".env")
+    if env_path.exists() and not force:
+        raise typer.BadParameter("`.env` already exists. Use --force to overwrite.")
+
+    backend = backend.strip().lower()
+    lines: list[str] = [f"BOOK_LLM_BACKEND={backend}"]
+    if backend == "ollama":
+        lines += [
+            f"BOOK_LLM_OLLAMA_URL={ollama_url}",
+            f"BOOK_LLM_OLLAMA_MODEL={ollama_model}",
+        ]
+    elif backend == "llama_cpp":
+        if model_path is None:
+            raise typer.BadParameter("--model-path is required for --backend llama_cpp")
+        if not model_path.exists():
+            raise typer.BadParameter(f"Model not found: {model_path}")
+        if model_path.suffix.lower() != ".gguf":
+            raise typer.BadParameter("Model must be a .gguf file.")
+        lines += [
+            f"BOOK_LLM_MODEL_PATH={model_path}",
+            f"BOOK_LLM_N_CTX={n_ctx}",
+            f"BOOK_LLM_N_THREADS={n_threads}",
+            f"BOOK_LLM_N_GPU_LAYERS={n_gpu_layers}",
+        ]
+        if chat_format:
+            lines.append(f"BOOK_LLM_CHAT_FORMAT={chat_format}")
+        else:
+            lines.append("# BOOK_LLM_CHAT_FORMAT=")
+    else:
+        raise typer.BadParameter("--backend must be ollama or llama_cpp")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Wrote[/green] {env_path.resolve()}")
 
 
 @app.command()
@@ -103,14 +168,7 @@ def ask(
     )
     context = format_context(retrieved)
 
-    cfg = LlmConfig(
-        model_path=_model_path_or_fail(model_path),
-        n_ctx=SETTINGS.n_ctx,
-        n_threads=SETTINGS.n_threads,
-        n_gpu_layers=SETTINGS.n_gpu_layers,
-        chat_format=os.getenv("BOOK_LLM_CHAT_FORMAT"),
-    )
-    llm = load_llm(cfg)
+    llm = _load_backend(model_path)
 
     system = (
         "You are BOOK LLM novv1. Use ONLY the provided context from books to answer.\n"
@@ -118,7 +176,7 @@ def ask(
         "At the end, add a short 'Sources:' list with filename + page range you used."
     )
     user = f"QUESTION:\n{question}\n\nCONTEXT:\n{context}"
-    answer = chat(llm, system=system, user=user, temperature=temperature)
+    answer = llm.chat(system=system, user=user, temperature=temperature)
     console.print(answer)
 
 
@@ -160,14 +218,7 @@ def summarize(
     if current:
         pieces.append(current)
 
-    cfg = LlmConfig(
-        model_path=_model_path_or_fail(model_path),
-        n_ctx=SETTINGS.n_ctx,
-        n_threads=SETTINGS.n_threads,
-        n_gpu_layers=SETTINGS.n_gpu_layers,
-        chat_format=os.getenv("BOOK_LLM_CHAT_FORMAT"),
-    )
-    llm = load_llm(cfg)
+    llm = _load_backend(model_path)
 
     system = (
         "You are BOOK LLM novv1. Summarize the provided book text.\n"
@@ -180,7 +231,7 @@ def summarize(
         user = (
             f"Summarize PART {i}/{len(pieces)} into 1-2 paragraphs.\n\nTEXT:\n{piece}"
         )
-        partials.append(chat(llm, system=system, user=user, temperature=temperature).strip())
+        partials.append(llm.chat(system=system, user=user, temperature=temperature).strip())
 
     if len(partials) == 1:
         console.print(partials[0])
@@ -191,7 +242,7 @@ def summarize(
         "Keep it readable and coherent.\n\nPARTIAL SUMMARIES:\n"
         + "\n\n---\n\n".join(partials)
     )
-    console.print(chat(llm, system=system, user=user_final, temperature=temperature))
+    console.print(llm.chat(system=system, user=user_final, temperature=temperature))
 
 
 @app.command()

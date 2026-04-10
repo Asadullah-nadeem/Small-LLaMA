@@ -25,8 +25,14 @@ def ingest_books(
     embed_model_name: str,
     chunk_chars: int = 1200,
     overlap_chars: int = 200,
+    only_files: list[str] | None = None,
 ) -> IngestResult:
-    pdfs = sorted([p for p in books_dir.glob("*.pdf") if p.is_file()])
+    all_pdfs = sorted([p for p in books_dir.glob("*.pdf") if p.is_file()])
+    if only_files:
+        allow = set(only_files)
+        pdfs = [p for p in all_pdfs if p.name in allow]
+    else:
+        pdfs = all_pdfs
     all_chunks: list[Chunk] = []
 
     for pdf in pdfs:
