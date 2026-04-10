@@ -20,6 +20,13 @@ Download any **GGUF** instruct model (small works best, e.g. 2B–8B) and set:
 $env:BOOK_LLM_MODEL_PATH="C:\path\to\model.gguf"
 ```
 
+Or copy `.env.example` to `.env` and edit the values (the app auto-loads `.env`):
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
 Optional:
 
 ```powershell
@@ -34,6 +41,14 @@ book-llm ingest --books-dir .\Book
 ```
 
 This creates `.\data\embeddings.npy` and `.\data\chunks.jsonl`.
+
+## Quick test script
+
+Edit `.env` (or set env vars) then run:
+
+```powershell
+.\example_commands.ps1
+```
 
 ## 4) Ask questions
 

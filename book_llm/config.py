@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    load_dotenv(find_dotenv(usecwd=True))
+except Exception:
+    pass
+
 
 @dataclass(frozen=True)
 class Settings:
